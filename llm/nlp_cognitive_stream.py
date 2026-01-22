@@ -65,6 +65,11 @@ memory_cleared = False  # 添加记忆清除标记
 # 新增: 当前会话用户名及按用户获取memory目录的辅助函数
 current_username = None  # 当前会话用户名
 
+def _log_prompt(messages: List[SystemMessage | HumanMessage], tag: str = ""):
+    """No-op placeholder for prompt logging (disabled)."""
+    return
+
+
 llm = ChatOpenAI(
         model=cfg.gpt_model_engine,
         base_url=cfg.gpt_base_url,
@@ -322,6 +327,18 @@ def _remove_think_from_text(text: str) -> str:
     cleaned = re.sub(r'<think>[\s\S]*?</think>', '', text, flags=re.IGNORECASE)
     cleaned = re.sub(r'</?think>', '', cleaned, flags=re.IGNORECASE)
     return cleaned.strip()
+
+
+def _strip_json_code_fence(text: str) -> str:
+    """Strip ```json ... ``` wrappers if present."""
+    if not text:
+        return text
+    import re
+    trimmed = text.strip()
+    match = re.match(r"^```(?:json)?\\s*(.*?)\\s*```$", trimmed, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return text
 
 
 def _format_conversation_block(conversation: List[Dict], username: str = "User") -> str:
@@ -638,7 +655,6 @@ def _build_planner_messages(state: AgentState) -> List[SystemMessage | HumanMess
 {observation or '（无补充）'}
 ---
 
-**关联记忆**
 {memory_context or '（无相关记忆）'}
 ---
 {prestart_section}
@@ -755,6 +771,7 @@ def _call_planner_llm(
         解析后的决策字典
     """
     messages = _build_planner_messages(state)
+    _log_prompt(messages, tag="planner")
 
     # 如果有流式回调，使用流式模式检测 finish+message
     if stream_callback is not None:
@@ -826,6 +843,7 @@ def _call_planner_llm(
 
         # 处理完整响应
         trimmed = _remove_think_from_text(accumulated.strip())
+        trimmed = _strip_json_code_fence(trimmed)
 
         if in_message_mode:
             # 提取完整 message 内容，去掉结尾的 "}
@@ -869,6 +887,7 @@ def _call_planner_llm(
         raise RuntimeError("规划器返回内容异常，未获得字符串。")
     # 先移除 think 标签，兼容带思考标签的模型（如 DeepSeek R1）
     trimmed = _remove_think_from_text(content.strip())
+    trimmed = _strip_json_code_fence(trimmed)
     try:
         decision = json.loads(trimmed)
     except json.JSONDecodeError as exc:
@@ -929,6 +948,7 @@ def _plan_next_action(state: AgentState) -> AgentState:
                         "规划器：检测到工具重复调用，使用最新结果产出最终回复。"
                     )
                     final_messages = _build_final_messages(state)
+                    _log_prompt(final_messages, tag="final")
                     preview = last_entry.get("output")
                     return {
                         "status": "completed",
@@ -1669,27 +1689,57 @@ def load_agent_memory(agent, username=None):
 
 # 记忆对话内容的线程函数
 def remember_conversation_thread(username, content, response_text):
-    """
-    在单独线程中记录对话内容到代理记忆
-    
-    参数:
-        username: 用户名
-        content: 用户问题内容
-        response_text: 代理回答内容
-    """
-    global agents
+    """Background task to store a conversation memory node."""
     try:
+        ag = create_agent(username)
+        if ag is None:
+            return
+        questioner = username
+        if isinstance(questioner, str) and questioner.lower() == "user":
+            questioner = "主人"
+        answerer = ag.scratch.get("first_name", "Fay")
+        question_text = content if content is not None else ""
+        answer_text = response_text if response_text is not None else ""
+        memory_content = f"{questioner}：{question_text}\n{answerer}：{answer_text}"
         with agent_lock:
-            ag = agents.get(username)
-            if ag is None:
-                return
             time_step = get_current_time_step(username)
-            name = "主人" if username == "User" else username
-            # 记录对话内容
-            memory_content = f"在对话中，我回答了{name}的问题：{content}\n，我的回答是：{response_text}"
-            ag.remember(memory_content, time_step)
+            if ag.memory_stream and hasattr(ag.memory_stream, "remember_conversation"):
+                ag.memory_stream.remember_conversation(memory_content, time_step)
+            else:
+                ag.remember(memory_content, time_step)
     except Exception as e:
-        util.log(1, f"记忆对话内容出错: {str(e)}")
+        util.log(1, f"记录对话记忆失败: {str(e)}")
+
+def remember_observation_thread(username, observation_text):
+    """Background task to store an observation memory node."""
+    try:
+        ag = create_agent(username)
+        if ag is None:
+            return
+        text = observation_text if observation_text is not None else ""
+        memory_content = text
+        with agent_lock:
+            time_step = get_current_time_step(username)
+            if ag.memory_stream and hasattr(ag.memory_stream, "remember"):
+                ag.memory_stream.remember(memory_content, time_step)
+            else:
+                ag.remember(memory_content, time_step)
+    except Exception as e:
+        util.log(1, f"记录观察记忆失败: {str(e)}")
+
+def record_observation(username, observation_text):
+    """Persist an observation memory node asynchronously."""
+    if observation_text is None:
+        return False, "observation text is required"
+    text = observation_text.strip() if isinstance(observation_text, str) else str(observation_text).strip()
+    if not text:
+        return False, "observation text is required"
+    try:
+        MyThread(target=remember_observation_thread, args=(username, text)).start()
+        return True, "observation recorded"
+    except Exception as exc:
+        util.log(1, f"记录观察记忆失败: {exc}")
+        return False, f"observation record failed: {exc}"
 
 def question(content, username, observation=None):
     """处理用户提问并返回回复。"""
@@ -1725,24 +1775,49 @@ def question(content, username, observation=None):
         ),
     }
 
+    memory_sections = [
+        ("观察记忆", "observation"),
+        ("对话记忆", "conversation"),
+        ("反思记忆", "reflection"),
+    ]
     memory_context = ""
-    if agent.memory_stream and len(agent.memory_stream.seq_nodes) > 0:
+    if agent.memory_stream and len(agent.memory_stream.seq_nodes) > 0 and content:
         current_time_step = get_current_time_step(username)
+        query = content.strip() if isinstance(content, str) else str(content)
+        max_per_type = 10
+        section_texts = []
         try:
-            query = f"{'主人' if username == 'User' else username}提出了问题：{content}"
-            related_memories = agent.memory_stream.retrieve(
+            combined = agent.memory_stream.retrieve(
                 [query],
                 current_time_step,
-                n_count=30,
+                n_count=max_per_type * len(memory_sections),
                 curr_filter="all",
                 hp=[0.8, 0.5, 0.5],
                 stateless=False,
             )
-            if related_memories and query in related_memories:
-                memory_nodes = related_memories[query]
-                memory_context = "\n".join(f"- {node.content}" for node in memory_nodes)
+            all_nodes = combined.get(query, []) if combined else []
         except Exception as exc:
-            util.log(1, f"获取相关记忆时出错: {exc}")
+            util.log(1, f"获取关联记忆时出错: {exc}")
+            all_nodes = []
+
+        for label, node_type in memory_sections:
+            section_lines = "（无）"
+            try:
+                memory_nodes = [n for n in all_nodes if getattr(n, "node_type", "") == node_type][:max_per_type]
+                if memory_nodes:
+                    formatted = []
+                    for node in memory_nodes:
+                        ts = (getattr(node, "datetime", "") or "").strip()
+                        prefix = f"[{ts}] " if ts else ""
+                        formatted.append(f"- {prefix}{node.content}")
+                    section_lines = "\n".join(formatted)
+            except Exception as exc:
+                util.log(1, f"获取{label}时出错: {exc}")
+                section_lines = "（获取失败）"
+            section_texts.append(f"**{label}**\n{section_lines}")
+        memory_context = "\n".join(section_texts)
+    else:
+        memory_context = "\n".join(f"**{label}**\n（无）" for label, _ in memory_sections)
 
     prestart_context = ""
     prestart_stream_text = ""

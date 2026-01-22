@@ -412,20 +412,29 @@ def api_send_v1_chat_completions():
                 return jsonify({'error': f'LLM request failed: {exc}'}), 500
 
         last_content = ""
-        if 'messages' in data and data['messages']:
-            last_message = data['messages'][-1]
-            username = last_message.get('role', 'User')
-            if username == 'user':
-                username = 'User'
-            last_content = last_message.get('content', 'No content provided')
-        else:
-            last_content = 'No messages found'
-            username = 'User'
+        username = "User"
+        messages = data.get("messages")
+        if isinstance(messages, list) and messages:
+            last_message = messages[-1] or {}
+            username = last_message.get("role", "User") or "User"
+            if username == "user":
+                username = "User"
+            last_content = last_message.get("content") or ""
+        elif isinstance(messages, str):
+            last_content = messages
 
         observation = data.get('observation', '')
         # 检查请求中是否指定了流式传输
         stream_requested = data.get('stream', False)
         no_reply = _as_bool(data.get('no_reply', data.get('noReply', False)))
+        obs_text = ""
+        if observation is not None:
+            obs_text = observation.strip() if isinstance(observation, str) else str(observation).strip()
+        message_text = last_content.strip() if isinstance(last_content, str) else str(last_content).strip()
+        if not message_text and not obs_text:
+            return jsonify({'error': 'messages and observation are both empty'}), 400
+        if not message_text and obs_text:
+            no_reply = True
         if no_reply:
             interact = Interact("text", 1, {'user': username, 'msg': last_content, 'observation': str(observation), 'stream': bool(stream_requested), 'no_reply': True})
             util.printInfo(1, username, '[text chat no_reply]{}'.format(interact.data["msg"]), time.time())
@@ -588,7 +597,6 @@ def api_delete_user():
 
             # 清除缓存的 agent 对象
             try:
-                from llm import nlp_cognitive_stream
                 if hasattr(nlp_cognitive_stream, 'agents') and username in nlp_cognitive_stream.agents:
                     del nlp_cognitive_stream.agents[username]
             except Exception:

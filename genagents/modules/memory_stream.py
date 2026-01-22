@@ -345,6 +345,19 @@ def extract_importance(seq_nodes):
     return {node.node_id: 50.0 for node in seq_nodes if node is not None and hasattr(node, 'node_id')}
 
 
+def _is_valid_embedding(vec, expected_dim):
+  if vec is None:
+    return False
+  if not isinstance(vec, (list, tuple)):
+    return False
+  if expected_dim is not None and len(vec) != expected_dim:
+    return False
+  for val in vec:
+    if not isinstance(val, (int, float)):
+      return False
+  return True
+
+
 def extract_relevance(seq_nodes, embeddings, focal_pt): 
   """
   Gets the current Persona object, a list of seq_nodes that are in a 
@@ -370,14 +383,30 @@ def extract_relevance(seq_nodes, embeddings, focal_pt):
     # 如果无法获取嵌入向量，返回默认值
     return {node.node_id: 0.5 for node in seq_nodes}
 
+  expected_dim = len(focal_embedding) if isinstance(focal_embedding, (list, tuple)) else None
   relevance_out = dict()
   for count, node in enumerate(seq_nodes): 
     try:
       # 检查节点内容是否在embeddings中
       if node.content in embeddings:
         node_embedding = embeddings[node.content]
+        if not _is_valid_embedding(node_embedding, expected_dim):
+          try:
+            regenerated = get_text_embedding(node.content)
+            if _is_valid_embedding(regenerated, expected_dim):
+              embeddings[node.content] = regenerated
+              node_embedding = regenerated
+            else:
+              print("Warning: regenerated embedding has unexpected dimension, using default relevance")
+              node_embedding = None
+          except Exception as e:
+            print(f"Regenerate embedding failed: {str(e)}")
+            node_embedding = None
         # 计算余弦相似度
-        relevance_out[node.node_id] = cos_sim(node_embedding, focal_embedding)
+        if node_embedding is None:
+          relevance_out[node.node_id] = 0.5
+        else:
+          relevance_out[node.node_id] = cos_sim(node_embedding, focal_embedding)
       else:
         # 如果没有对应的嵌入向量，使用默认值
         relevance_out[node.node_id] = 0.5
@@ -400,6 +429,7 @@ class ConceptNode:
     self.node_type = node_dict["node_type"]
     self.content = node_dict["content"]
     self.importance = node_dict["importance"]
+    self.datetime = node_dict.get("datetime", "")
     # 确保created是整数类型
     self.created = int(node_dict["created"]) if node_dict["created"] is not None else 0
     # 确保last_retrieved是整数类型
@@ -421,6 +451,7 @@ class ConceptNode:
     curr_package["node_type"] = self.node_type
     curr_package["content"] = self.content
     curr_package["importance"] = self.importance
+    curr_package["datetime"] = self.datetime
     curr_package["created"] = self.created
     curr_package["last_retrieved"] = self.last_retrieved
     curr_package["pointer_id"] = self.pointer_id
@@ -473,7 +504,7 @@ class MemoryStream:
       time_step: Current time_step 
       n_count: The number of nodes that we want to retrieve. 
       curr_filter: Filtering the node.type that we want to retrieve. 
-        Acceptable values are 'all', 'reflection', 'observation' 
+        Acceptable values are 'all', 'reflection', 'observation', 'conversation' 
       hp: Hyperparameter for [recency_w, relevance_w, importance_w]
       verbose: verbose
     Returns: 
@@ -486,8 +517,8 @@ class MemoryStream:
     if len(self.seq_nodes) == 0:
       return dict()
 
-    # Filtering for the desired node type. curr_filter can be one of the three
-    # elements: 'all', 'reflection', 'observation' 
+    # Filtering for the desired node type. curr_filter can be one of the
+    # elements: 'all', 'reflection', 'observation', 'conversation'
     if curr_filter == "all": 
       curr_nodes = self.seq_nodes
     else: 
@@ -556,7 +587,7 @@ class MemoryStream:
 
     Parameters:
       time_step: Current time_step 
-      node_type: type of node -- it's either reflection, observation
+      node_type: type of node -- it's either reflection, observation, conversation
       content: the str content of the memory record
       importance: int score of the importance score
       pointer_id: the str of the parent node 
@@ -569,6 +600,7 @@ class MemoryStream:
     node_dict["node_type"] = node_type
     node_dict["content"] = content
     node_dict["importance"] = importance
+    node_dict["datetime"] = datetime.datetime.now().strftime("%Y/%m/%d %H:%M:%S")
     node_dict["created"] = time_step
     node_dict["last_retrieved"] = time_step
     node_dict["pointer_id"] = pointer_id
@@ -592,6 +624,10 @@ class MemoryStream:
   def remember(self, content, time_step=0):
     score = generate_importance_score([content])[0]
     self._add_node(time_step, "observation", content, score, None)
+
+  def remember_conversation(self, content, time_step=0):
+    score = generate_importance_score([content])[0]
+    self._add_node(time_step, "conversation", content, score, None)
 
 
   def reflect(self, anchor, reflection_count=5, 
