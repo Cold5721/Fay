@@ -64,6 +64,7 @@ embedding_api_key = None
 _last_loaded_project_id = None
 _last_loaded_config = None
 _last_loaded_from_api = False  # 表示上次加载来自配置中心（含缓存）
+_bootstrap_loaded_from_api = False  # 无本地配置时启动阶段已从配置中心加载过
 _warned_public_project_ids = set()
 
 # config server中心配置，system.conf与config.json存在时不会使用配置中心
@@ -205,11 +206,13 @@ def load_config(force_reload=False):
     global _last_loaded_project_id
     global _last_loaded_config
     global _last_loaded_from_api
+    global _bootstrap_loaded_from_api
 
     _refresh_config_center()
 
     env_project_id = os.getenv('FAY_CONFIG_CENTER_ID')
-    using_config_center = bool(env_project_id)
+    explicit_config_center = bool(env_project_id)
+    using_config_center = explicit_config_center
     if (
         env_project_id
         and not force_reload
@@ -223,8 +226,12 @@ def load_config(force_reload=False):
     default_config_json_path = os.path.join(os.getcwd(), 'config.json')
     cache_system_conf_path = os.path.join(os.getcwd(), 'cache_data', 'system.conf')
     cache_config_json_path = os.path.join(os.getcwd(), 'cache_data', 'config.json')
+    root_system_conf_exists = os.path.exists(default_system_conf_path)
+    root_config_json_exists = os.path.exists(default_config_json_path)
+    root_config_complete = root_system_conf_exists and root_config_json_exists
 
     # 构建system.conf和config.json的完整路径
+    config_center_fallback = False
     if using_config_center:
         system_conf_path = cache_system_conf_path
         config_json_path = cache_config_json_path
@@ -238,11 +245,25 @@ def load_config(force_reload=False):
             system_conf_path = default_system_conf_path
             config_json_path = default_config_json_path
 
+        if not root_config_complete:
+            cache_ready = os.path.exists(cache_system_conf_path) and os.path.exists(cache_config_json_path)
+            if (not _bootstrap_loaded_from_api) or (not cache_ready):
+                using_config_center = True
+                config_center_fallback = True
+                system_conf_path = cache_system_conf_path
+                config_json_path = cache_config_json_path
+            else:
+                system_conf_path = cache_system_conf_path
+                config_json_path = cache_config_json_path
+
     forced_loaded = False
     loaded_from_api = False
     api_attempted = False
     if using_config_center:
-        util.log(1, f"检测到配置中心参数，优先加载项目配置: {CONFIG_SERVER['PROJECT_ID']}")
+        if explicit_config_center:
+            util.log(1, f"检测到配置中心参数，优先加载项目配置: {CONFIG_SERVER['PROJECT_ID']}")
+        else:
+            util.log(1, f"未检测到本地system.conf或config.json，尝试从配置中心加载配置: {CONFIG_SERVER['PROJECT_ID']}")
         api_config = load_config_from_api(CONFIG_SERVER['PROJECT_ID'])
         api_attempted = True
         if api_config:
@@ -250,6 +271,8 @@ def load_config(force_reload=False):
             system_config = api_config['system_config']
             config = api_config['config']
             loaded_from_api = True
+            if config_center_fallback:
+                _bootstrap_loaded_from_api = True
 
             # 缓存API配置到本地文件
             system_conf_path = cache_system_conf_path
@@ -281,6 +304,8 @@ def load_config(force_reload=False):
                     system_config = api_config['system_config']
                     config = api_config['config']
                     loaded_from_api = True
+                    if config_center_fallback:
+                        _bootstrap_loaded_from_api = True
 
                     # 缓存API配置到本地文件
                     system_conf_path = cache_system_conf_path
@@ -322,6 +347,20 @@ def load_config(force_reload=False):
         if _last_loaded_config is not None and _last_loaded_from_api:
             util.log(2, "配置中心缓存不可用，继续使用内存中的配置")
             return _last_loaded_config
+    if config_center_fallback and using_config_center and (not sys_conf_exists or not config_json_exists):
+        cache_ready = os.path.exists(cache_system_conf_path) and os.path.exists(cache_config_json_path)
+        if cache_ready:
+            util.log(2, "配置中心不可用，回退使用缓存配置")
+            using_config_center = False
+            system_conf_path = cache_system_conf_path
+            config_json_path = cache_config_json_path
+        else:
+            util.log(2, "配置中心不可用，回退使用本地配置文件")
+            using_config_center = False
+            system_conf_path = default_system_conf_path
+            config_json_path = default_config_json_path
+        sys_conf_exists = os.path.exists(system_conf_path)
+        config_json_exists = os.path.exists(config_json_path)
     # 如果本地文件存在，从本地文件加载
     # 加载system.conf
     system_config = ConfigParser()

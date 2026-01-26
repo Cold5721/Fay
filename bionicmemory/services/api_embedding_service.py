@@ -152,7 +152,7 @@ class ApiEmbeddingService:
                 # 首次调用时获取实际维度
                 if self.embedding_dim is None:
                     self.embedding_dim = len(embedding)
-                    logger.info(f"动态获取 embedding 维度: {self.embedding_dim}")
+                    logger.info(f"动态获取 embedding 维度: {self.embedding_dim},与原记忆节点不一致，将重新生成记忆节点的 embedding维度")
 
                 logger.info(f"embedding 生成成功")
                 return embedding
