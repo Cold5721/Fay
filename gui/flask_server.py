@@ -111,6 +111,22 @@ def _build_llm_url(base_url: str) -> str:
         return url + "/chat/completions"
     return url + "/v1/chat/completions"
 
+
+
+def _build_embedding_url(base_url: str) -> str:
+    if not base_url:
+        return ""
+    url = base_url.rstrip("/")
+    if url.endswith("/v1/embeddings") or url.endswith("/embeddings"):
+        return url
+    if url.endswith("/v1/chat/completions"):
+        return url[:-len("/v1/chat/completions")] + "/v1/embeddings"
+    if url.endswith("/chat/completions"):
+        return url[:-len("/chat/completions")] + "/embeddings"
+    if url.endswith("/v1"):
+        return url + "/embeddings"
+    return url + "/v1/embeddings"
+
 @__app.route('/api/submit', methods=['post'])
 def api_submit():
     data = request.values.get('data')
@@ -353,7 +369,7 @@ def api_send_v1_chat_completions():
     # 处理聊天完成请求
     data = request.get_json()
     if not data:
-        return jsonify({'error': '未提供数据'})
+        return jsonify({'error': 'missing request body'})
     try:
         model = data.get('model', 'fay')
         if model == 'llm':
@@ -862,6 +878,48 @@ def gpt_stream_response(last_content, username):
     return Response(generate(), mimetype='text/event-stream')
 
 # 处理非流式响应
+@__app.route('/v1/embeddings', methods=['post'])
+@__app.route('/api/send/v1/embeddings', methods=['post'])
+def api_send_v1_embeddings():
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'missing request body'})
+    try:
+        config_util.load_config()
+        base_url = config_util.embedding_api_base_url or config_util.gpt_base_url
+        api_key = config_util.embedding_api_key or config_util.key_gpt_api_key
+        model_name = config_util.embedding_api_model
+    except Exception as exc:
+        return jsonify({'error': f'Embedding config load failed: {exc}'}), 500
+
+    embed_url = _build_embedding_url(base_url)
+    if not embed_url:
+        return jsonify({'error': 'Embedding base_url is not configured'}), 500
+
+    payload = dict(data) if isinstance(data, dict) else {}
+    req_model = payload.get('model')
+    if (not req_model) or str(req_model).lower() in ('embedding', 'fay-embedding', 'fay', 'default'):
+        if model_name:
+            payload['model'] = model_name
+
+    headers = {'Content-Type': 'application/json'}
+    if api_key:
+        headers['Authorization'] = f'Bearer {api_key}'
+
+    try:
+        resp = requests.post(embed_url, headers=headers, json=payload, timeout=60)
+        content_type = resp.headers.get("Content-Type", "application/json")
+        if "charset=" not in content_type.lower():
+            content_type = f"{content_type}; charset=utf-8"
+        return Response(
+            resp.content,
+            status=resp.status_code,
+            content_type=content_type,
+        )
+    except Exception as exc:
+        return jsonify({'error': f'Embedding request failed: {exc}'}), 500
+
+
 def non_streaming_response(last_content, username):
     sm = stream_manager.new_instance()
     _, nlp_Stream = sm.get_Stream(username)
