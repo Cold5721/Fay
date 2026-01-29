@@ -1517,9 +1517,28 @@ def init_memory_scheduler():
     global agents
     
     # 确保agent已经创建
+    agent = None
     if not agents:
         util.log(1, '创建代理实例...')
-        create_agent()
+        agent = create_agent()
+    else:
+        agent = agents.get("User")
+        if agent is None and len(agents) > 0:
+            agent = next(iter(agents.values()))
+
+    # 启动阶段做一次 embedding 维度检查，避免首条消息时触发
+    try:
+        if agent and agent.memory_stream and hasattr(agent.memory_stream, "precheck_embedding_dimensions"):
+            result = agent.memory_stream.precheck_embedding_dimensions()
+            if result.get("checked"):
+                util.log(
+                    1,
+                    f"启动阶段记忆 embedding 维度检查完成: dim={result.get('expected_dim')}, 修复={result.get('fixed')}"
+                )
+            else:
+                util.log(1, "启动阶段记忆 embedding 维度检查跳过（无记忆/无embedding）")
+    except Exception as e:
+        util.log(1, f"启动阶段 embedding 维度检查失败: {str(e)}")
     
     # 设置每天0点保存记忆
     schedule.every().day.at("00:00").do(save_agent_memory)
@@ -1642,6 +1661,26 @@ def create_agent(username=None):
         # 如果memory目录存在且不为空，则加载之前保存的记忆（不包括scratch数据）
         if is_exist:
             load_agent_memory(agent, username)
+            try:
+                if agent.memory_stream and hasattr(agent.memory_stream, "precheck_embedding_dimensions"):
+                    result = agent.memory_stream.precheck_embedding_dimensions(force=True)
+                    if result.get("checked"):
+                        util.log(
+                            1,
+                            f"启动阶段记忆 embedding 维度检查完成: dim={result.get('expected_dim')}, 修复={result.get('fixed')}"
+                        )
+                        if result.get("fixed"):
+                            try:
+                                embeddings_path = os.path.join(memory_dir, "memory_stream", "embeddings.json")
+                                with open(embeddings_path, "w", encoding="utf-8") as f:
+                                    json.dump(agent.memory_stream.embeddings or {}, f, ensure_ascii=False, indent=2)
+                                util.log(1, f"启动阶段已写回 embeddings.json (修复={result.get('fixed')})")
+                            except Exception as write_err:
+                                util.log(1, f"写回 embeddings.json 失败: {str(write_err)}")
+                    else:
+                        util.log(1, "启动阶段记忆 embedding 维度检查跳过（无记忆/无embedding）")
+            except Exception as e:
+                util.log(1, f"启动阶段 embedding 维度检查失败: {str(e)}")
         
         # 缓存到字典
         agents[username] = agent

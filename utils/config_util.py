@@ -1,7 +1,7 @@
 import os
 import json
 import codecs
-from langsmith.schemas import Feedback
+# from langsmith.schemas import Feedback  # 临时注释
 import requests
 from configparser import ConfigParser
 import functools
@@ -65,7 +65,29 @@ _last_loaded_project_id = None
 _last_loaded_config = None
 _last_loaded_from_api = False  # 表示上次加载来自配置中心（含缓存）
 _bootstrap_loaded_from_api = False  # 无本地配置时启动阶段已从配置中心加载过
-_warned_public_project_ids = set()
+_warned_public_config_keys = set()
+
+# Public config center identifiers (warn users if matched)
+PUBLIC_CONFIG_PROJECT_ID = 'd19f7b0a-2b8a-4503-8c0d-1a587b90eb69'
+PUBLIC_CONFIG_BASE_URL = 'http://1.12.69.110:5500'
+
+
+def _public_config_warn_key():
+    base_url = (CONFIG_SERVER.get('BASE_URL') or '').rstrip('/')
+    public_base = PUBLIC_CONFIG_BASE_URL.rstrip('/')
+    if base_url == public_base:
+        return f"base_url:{base_url}"
+    if CONFIG_SERVER.get('PROJECT_ID') == PUBLIC_CONFIG_PROJECT_ID:
+        return f"project_id:{CONFIG_SERVER.get('PROJECT_ID')}"
+    return None
+
+
+def _warn_public_config_once():
+    key = _public_config_warn_key()
+    if not key or key in _warned_public_config_keys:
+        return
+    _warned_public_config_keys.add(key)
+    print("\033[1;33;41m警告：你正在使用社区公共配置,请尽快更换！\033[0m")
 
 # config server中心配置，system.conf与config.json存在时不会使用配置中心
 CONFIG_SERVER = {
@@ -280,12 +302,7 @@ def load_config(force_reload=False):
             save_api_config_to_local(api_config, system_conf_path, config_json_path)
             forced_loaded = True
 
-            if (
-                CONFIG_SERVER['PROJECT_ID'] == 'd19f7b0a-2b8a-4503-8c0d-1a587b90eb69'
-                and CONFIG_SERVER['PROJECT_ID'] not in _warned_public_project_ids
-            ):
-                _warned_public_project_ids.add(CONFIG_SERVER['PROJECT_ID'])
-                print("\033[1;33;41m警告：你正在使用社区公共配置,请尽快更换！\033[0m")
+            _warn_public_config_once()
         else:
             util.log(2, "配置中心加载失败，尝试使用缓存配置")
 
@@ -312,12 +329,7 @@ def load_config(force_reload=False):
                     config_json_path = cache_config_json_path
                     save_api_config_to_local(api_config, system_conf_path, config_json_path)
 
-                    if (
-                        CONFIG_SERVER['PROJECT_ID'] == 'd19f7b0a-2b8a-4503-8c0d-1a587b90eb69'
-                        and CONFIG_SERVER['PROJECT_ID'] not in _warned_public_project_ids
-                    ):
-                        _warned_public_project_ids.add(CONFIG_SERVER['PROJECT_ID'])
-                        print("\033[1;33;41m警告：你正在使用社区公共配置,请尽快更换！\033[0m")
+                    _warn_public_config_once()
         else:
             # 使用提取的项目ID或全局项目ID
             util.log(1, f"本地配置文件不完整（{system_conf_path if not sys_conf_exists else ''}{'和' if not sys_conf_exists and not config_json_exists else ''}{config_json_path if not config_json_exists else ''}不存在），尝试从API加载配置...")
@@ -334,12 +346,7 @@ def load_config(force_reload=False):
                 config_json_path = cache_config_json_path
                 save_api_config_to_local(api_config, system_conf_path, config_json_path)
 
-                if (
-                    CONFIG_SERVER['PROJECT_ID'] == 'd19f7b0a-2b8a-4503-8c0d-1a587b90eb69'
-                    and CONFIG_SERVER['PROJECT_ID'] not in _warned_public_project_ids
-                ):
-                    _warned_public_project_ids.add(CONFIG_SERVER['PROJECT_ID'])
-                    print("\033[1;33;41m警告：你正在使用社区公共配置,请尽快更换！\033[0m")
+                _warn_public_config_once()
 
     sys_conf_exists = os.path.exists(system_conf_path)
     config_json_exists = os.path.exists(config_json_path)

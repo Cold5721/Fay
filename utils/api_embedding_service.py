@@ -123,6 +123,7 @@ class ApiEmbeddingService:
     def encode_text(self, text: str) -> List[float]:
         """编码单个文本（带重试机制）"""
         import time
+        import requests.exceptions
 
         text = _sanitize_text(text)
         last_error = None
@@ -152,7 +153,15 @@ class ApiEmbeddingService:
                 # 首次调用时获取实际维度
                 if self.embedding_dim is None:
                     self.embedding_dim = len(embedding)
-                    logger.info(f"动态获取 embedding 维度: {self.embedding_dim},与原记忆节点不一致，将重新生成记忆节点的 embedding维度")
+                    logger.info(f"动态获取 embedding 维度: {self.embedding_dim}")
+                else:
+                    # 检查维度一致性
+                    current_dim = len(embedding)
+                    if current_dim != self.embedding_dim:
+                        logger.warning(f"⚠️  Embedding维度不一致! 期望={self.embedding_dim}, 实际={current_dim}, 文本='{text_preview}'")
+                        logger.warning(f"   建议检查API配置或模型设置")
+                        # 更新维度记录
+                        self.embedding_dim = current_dim
 
                 logger.info(f"embedding 生成成功")
                 return embedding
@@ -166,6 +175,38 @@ class ApiEmbeddingService:
                     time.sleep(wait_time)
                 else:
                     logger.error(f"所有重试均失败，文本长度: {len(text)}")
+                    raise
+
+            except requests.exceptions.ConnectionError as e:
+                last_error = e
+                # 网络连接错误，包括DNS解析失败
+                logger.warning(f"网络连接失败 (尝试 {attempt + 1}/{self.max_retries + 1}): {e}")
+                if attempt < self.max_retries:
+                    wait_time = 2 ** attempt  # 指数退避
+                    logger.info(f"等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"网络连接持续失败，请检查网络设置和API地址: {self.api_base_url}")
+                    raise
+
+            except requests.exceptions.HTTPError as e:
+                last_error = e
+                # HTTP错误（4xx, 5xx）
+                status_code = e.response.status_code if e.response else "未知"
+                logger.error(f"HTTP错误 {status_code} (尝试 {attempt + 1}/{self.max_retries + 1}): {e}")
+                
+                # 对于客户端错误（4xx），通常不需要重试
+                if e.response and 400 <= e.response.status_code < 500:
+                    logger.error(f"客户端错误，不进行重试: {e.response.text}")
+                    raise
+                
+                # 对于服务器错误（5xx），可以重试
+                if attempt < self.max_retries:
+                    wait_time = 2 ** attempt
+                    logger.info(f"服务器错误，等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"服务器错误持续发生")
                     raise
 
             except Exception as e:
@@ -202,6 +243,28 @@ class ApiEmbeddingService:
             result = response.json()
             embeddings = [item['embedding'] for item in result['data']]
 
+            # 检查批量embedding的维度一致性
+            if embeddings:
+                dimensions = [len(emb) for emb in embeddings]
+                unique_dims = set(dimensions)
+                
+                if len(unique_dims) > 1:
+                    logger.warning(f"⚠️  批量embedding维度不一致: {dict(zip(range(len(dimensions)), dimensions))}")
+                    logger.warning(f"   唯一维度: {unique_dims}")
+                
+                # 检查与已知维度的一致性
+                if self.embedding_dim is not None:
+                    for i, dim in enumerate(dimensions):
+                        if dim != self.embedding_dim:
+                            text_preview = texts[i][:30] + "..." if len(texts[i]) > 30 else texts[i]
+                            logger.warning(f"⚠️  文本{i}维度不一致: 期望={self.embedding_dim}, 实际={dim}, 文本='{text_preview}'")
+                else:
+                    # 首次批量调用，设置维度
+                    if dimensions:
+                        self.embedding_dim = dimensions[0]
+                        logger.info(f"从批量请求动态获取 embedding 维度: {self.embedding_dim}")
+
+            logger.info(f"批量 embedding 生成成功: {len(embeddings)} 个向量")
             return embeddings
         except Exception as e:
             logger.error(f"批量文本编码失败: {e}")
@@ -216,6 +279,29 @@ class ApiEmbeddingService:
             "initialized": self._initialized,
             "service_type": "api"
         }
+
+    def health_check(self) -> dict:
+        """健康检查：测试embedding服务是否正常工作"""
+        try:
+            # 使用简单文本测试服务
+            test_text = "health_check"
+            embedding = self.encode_text(test_text)
+            
+            return {
+                "status": "healthy",
+                "model": self.model_name,
+                "api_url": self.api_base_url,
+                "embedding_dim": len(embedding) if embedding else None,
+                "test_successful": True
+            }
+        except Exception as e:
+            return {
+                "status": "unhealthy",
+                "model": self.model_name,
+                "api_url": self.api_base_url,
+                "error": str(e),
+                "test_successful": False
+            }
 
 # 全局实例
 _global_embedding_service = None
