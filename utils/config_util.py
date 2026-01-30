@@ -1,13 +1,39 @@
 import os
 import json
 import codecs
-# from langsmith.schemas import Feedback  # 临时注释
 import requests
 from configparser import ConfigParser
 import functools
 from threading import Lock
 import threading
 from utils import util
+
+# 条件导入 langsmith
+try:
+    # 检查是否有相关环境变量或包可用
+    langsmith_env_vars = ['LANGCHAIN_API_KEY', 'LANGSMITH_API_KEY', 'LANGCHAIN_TRACING_V2']
+    has_langsmith_env = any(os.getenv(var) for var in langsmith_env_vars)
+    
+    if has_langsmith_env:
+        from langsmith.schemas import Feedback
+        util.log(1, "检测到 LangSmith 环境变量，已导入 langsmith.schemas.Feedback")
+    else:
+        # 尝试导入以检查包是否可用
+        import langsmith.schemas
+        from langsmith.schemas import Feedback
+        util.log(1, "langsmith 包可用，已导入 langsmith.schemas.Feedback")
+except ImportError:
+    # langsmith 包不可用，定义一个占位符类
+    class Feedback:
+        """langsmith 不可用时的占位符类"""
+        pass
+    util.log(2, "langsmith 包不可用，使用占位符类。如需使用 LangSmith 功能，请安装: pip install langsmith")
+except Exception as e:
+    # 其他导入错误
+    class Feedback:
+        """langsmith 导入失败时的占位符类"""
+        pass
+    util.log(2, f"langsmith 导入失败: {str(e)}，使用占位符类")
 
 # 线程本地存储，用于支持多个项目配置
 _thread_local = threading.local()
